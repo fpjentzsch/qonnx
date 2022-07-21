@@ -194,7 +194,8 @@ class Quant(CustomOp):
         unit_scale = np.all(scale == 1.0)
         zero_zeropt = np.all(zeropt == 0.0)
         assert zero_zeropt, "Only zero_point=0 Quant nodes supported for now"
-        if unit_scale and zero_zeropt:
+        # Fix broken inference cost calculation: why would scale have to be 1?
+        if zero_zeropt:
             finn_dt = self.get_integer_datatype(model)
         else:
             finn_dt = DataType["FLOAT32"]
