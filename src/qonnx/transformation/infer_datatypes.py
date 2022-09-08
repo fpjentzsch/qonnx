@@ -98,6 +98,14 @@ def _infer_node_datatype(model, node):
             # set output dtype = input dtype
             idtype = model.get_tensor_datatype(node.input[0])
             model.set_tensor_datatype(node.output[0], idtype)
+        # temporary fix for inference cost calculation of residual connections (breaks normal FINN flow!)
+        # elif node.op_type in ["Add"]:
+        #     idtype = model.get_tensor_datatype(node.input[0])
+        #     if idtype.signed():
+        #         odtype = DataType.get_smallest_possible(2 * idtype.min())
+        #     else:
+        #         odtype = DataType.get_smallest_possible(2 * idtype.max())
+        #     model.set_tensor_datatype(node.output[0], odtype)
         else:
             # unknown, assume node produces float32 outputs
             for o in node.output:
