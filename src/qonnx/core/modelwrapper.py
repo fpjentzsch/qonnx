@@ -429,14 +429,24 @@ class ModelWrapper:
         """Checks if the given node is a fork, that is, the node has multiple
         direct successors"""
         direct_successors = self.find_direct_successors(node)
-        is_fork = False if direct_successors is None else (len(direct_successors) > 1)
+        # if the node output is also wired to a top-level output, it is still
+        # a fork with only 1 direct successor
+        if node.output[0] in [x.name for x in self.graph.output]:
+            is_fork = False if direct_successors is None else (len(direct_successors) > 0)
+        else:
+            is_fork = False if direct_successors is None else (len(direct_successors) > 1)
         return is_fork
 
     def is_join_node(self, node):
         """Checks if the given node is a join, that is, the node has multiple
         direct predecessors"""
         direct_predecessors = self.find_direct_predecessors(node)
-        is_join = False if direct_predecessors is None else (len(direct_predecessors) > 1)
+        # if the node input is also wired to a top-level input, it is still
+        # a fork with only 1 direct predecessor
+        if node.input[0] in [x.name for x in self.graph.input]:
+            is_join = False if direct_predecessors is None else (len(direct_predecessors) > 0)
+        else:
+            is_join = False if direct_predecessors is None else (len(direct_predecessors) > 1)
         return is_join
 
     def get_all_tensor_names(self):
@@ -541,7 +551,7 @@ class ModelWrapper:
         return list(filter(lambda x: not util.is_finn_op(x.domain), self.graph.node))
 
     def get_node_index(self, node):
-        """Returns current index of given node."""
+        """Returns current index of given node, or None if not found."""
         n_ind = 0
         try:
             for n in self.graph.node:
@@ -550,6 +560,17 @@ class ModelWrapper:
                 n_ind += 1
         except ValueError:
             return None
+        return None
+
+    def get_node_from_name(self, node_name):
+        """Returns the node with the specified name, or None if not found."""
+        try:
+            for node in self.graph.node:
+                if node.name == node_name:
+                    return node
+        except ValueError:
+            return None
+        return None
 
     def get_tensor_layout(self, tensor_name):
         """Returns the data layout annotation of tensor with given name.
