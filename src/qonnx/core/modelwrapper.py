@@ -1,4 +1,5 @@
-# Copyright (c) 2020 Xilinx, Inc.
+# Copyright (c) 2022 - 2025 Advanced Micro Devices, Inc.
+# Copyright (c) 2020 - 2022 Xilinx, Inc.
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -27,6 +28,7 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 import copy
+import inspect
 import onnx
 import onnx.helper as oh
 import onnx.numpy_helper as np_helper
@@ -37,6 +39,7 @@ from onnx import TensorProto
 import qonnx.util.basic as util
 import qonnx.util.onnx as onnxutil
 from qonnx.core.datatype import DataType
+from qonnx.custom_op.registry import getCustomOp, is_custom_op
 from qonnx.transformation.double_to_single_float import DoubleToSingleFloat
 from qonnx.transformation.general import (
     GiveUniqueParameterTensors,
@@ -125,27 +128,78 @@ class ModelWrapper:
         """Saves the wrapper ONNX ModelProto into a file with given name."""
         onnx.save(self._model_proto, filename)
 
-    def analysis(self, analysis_fxn):
+    def analysis(self, analysis_fxn, apply_to_subgraphs=False):
         """Runs given anaylsis_fxn on this model and return resulting dict."""
-        return analysis_fxn(self)
+        if apply_to_subgraphs:
+            assert "apply_to_subgraphs" in inspect.signature(
+                analysis_fxn
+            ), "analysis_fxn must have 'apply_to_subgraphs' argument when apply_to_subgraphs == True"
+            return analysis_fxn(self, apply_to_subgraphs)
+        else:
+            return analysis_fxn(self)
 
-    def transform(self, transformation, make_deepcopy=True, cleanup=True):
+    def transform_subgraphs(
+        self, transformation, make_deepcopy=True, cleanup=True, apply_to_subgraphs=False, use_preorder_traversal=True
+    ):
+        """Applies given Transformation to all subgraphs of this ModelWrapper instance.
+
+        - make_deepcopy : operates on a new (deep)copy of model.
+        - cleanup : execute cleanup transformations before returning
+        - apply_to_subgraphs : if True, transformation is applied to all subgraphs of the model
+        - use_preorder_traversal : if True, uses preorder traversal for subgraph transformation,
+          otherwise postorder traversal is used.
+        """
+        for node in self.model.graph.node:
+            transformed_subgraph_attrs = []
+            for idx, attr in enumerate(node.attribute):
+                if attr.type == onnx.AttributeProto.GRAPH:
+                    # this is a subgraph, add it to the list
+                    subgraph = self.make_subgraph_modelwrapper(attr.g)
+                    # apply the transformation to the subgraph
+                    subgraph = subgraph.transform(
+                        transformation, make_deepcopy, cleanup, apply_to_subgraphs, use_preorder_traversal
+                    )
+                    # update the new subgraph in the attrubute
+                    transformed_subgraph_attrs.append((idx, onnx.helper.make_attribute(attr.name, subgraph.model.graph)))
+            # replace the attributes in the node with the transformed subgraph attributes
+            for idx, new_attr in transformed_subgraph_attrs:
+                # remove the old attribute
+                node.attribute.pop(idx)
+                # add the new attribute
+                node.attribute.insert(idx, new_attr)
+
+    def transform(
+        self, transformation, make_deepcopy=True, cleanup=True, apply_to_subgraphs=False, use_preorder_traversal=True
+    ):
         """Applies given Transformation repeatedly until no more changes can be made
         and returns a transformed ModelWrapper instance.
 
         - make_deepcopy : operates on a new (deep)copy of model.
         - cleanup : execute cleanup transformations before returning
+        - apply_to_subgraphs : if True, transformation is applied to all subgraphs of the model
         """
         transformed_model = self
         if make_deepcopy:
             transformed_model = copy.deepcopy(self)
         if self.fix_float64:
             (transformed_model, model_was_changed) = DoubleToSingleFloat().apply(transformed_model)
+
+        if apply_to_subgraphs and (use_preorder_traversal is False):
+            transformed_model.transform_subgraphs(
+                transformation, make_deepcopy, cleanup, apply_to_subgraphs, use_preorder_traversal
+            )
+
         model_was_changed = True
         while model_was_changed:
             (transformed_model, model_was_changed) = transformation.apply(transformed_model)
         if cleanup:
             transformed_model.cleanup()
+
+        if apply_to_subgraphs and use_preorder_traversal:
+            transformed_model.transform_subgraphs(
+                transformation, make_deepcopy, cleanup, apply_to_subgraphs, use_preorder_traversal
+            )
+
         return transformed_model
 
     def cleanup(self):
@@ -162,19 +216,8 @@ class ModelWrapper:
             transformed_model = transformed_model.transform(trn, cleanup=False, make_deepcopy=False)
         return transformed_model
 
-    def check_compatibility(self):
-        """Checks this model for QONNX compatibility:
-
-        * no embedded subgraphs
-
-        * all tensor shapes are specified, including activations
-
-        * all constants are initializers
-        """
-        # TODO check for no embedded subgraphs
-        # TODO check that all shapes are inferred
-        # TODO check that all constants are initializers
-        return True
+    def make_subgraph_modelwrapper(self, subgraph):
+        return ModelWrapper(util.qonnx_make_model(subgraph, opset_imports=self._model_proto.opset_import))
 
     def get_tensor_datatype(self, tensor_name):
         """Returns the QONNX DataType of tensor with given name."""
@@ -568,7 +611,7 @@ class ModelWrapper:
     def get_metadata_prop(self, key):
         """Returns the value associated with metadata_prop with given key,
         or None otherwise."""
-        metadata_prop = util.get_by_name(self.model.metadata_props, key, "key")
+        metadata_prop = util.get_by_name(self.model.graph.metadata_props, key, "key")
         if metadata_prop is None:
             return None
         else:
@@ -576,12 +619,12 @@ class ModelWrapper:
 
     def set_metadata_prop(self, key, value):
         """Sets metadata property with given key to the given value."""
-        metadata_prop = util.get_by_name(self.model.metadata_props, key, "key")
+        metadata_prop = util.get_by_name(self.model.graph.metadata_props, key, "key")
         if metadata_prop is None:
             metadata_prop = onnx.StringStringEntryProto()
             metadata_prop.key = key
             metadata_prop.value = value
-            self.model.metadata_props.append(metadata_prop)
+            self.model.graph.metadata_props.append(metadata_prop)
         else:
             metadata_prop.value = value
 
@@ -591,11 +634,11 @@ class ModelWrapper:
 
     def get_finn_nodes(self):
         """Returns a list of nodes where domain == 'qonnx.*'."""
-        return list(filter(lambda x: util.is_finn_op(x.domain), self.graph.node))
+        return list(filter(lambda x: is_custom_op(x.domain), self.graph.node))
 
     def get_non_finn_nodes(self):
         """Returns a list of nodes where domain != 'qonnx.*'."""
-        return list(filter(lambda x: not util.is_finn_op(x.domain), self.graph.node))
+        return list(filter(lambda x: not is_custom_op(x.domain), self.graph.node))
 
     def get_node_index(self, node):
         """Returns current index of given node, or None if not found."""
@@ -697,3 +740,44 @@ class ModelWrapper:
             qa.tensor_name = tensor_name
             qa.quant_parameter_tensor_names.append(dt)
             qnt_annotations.append(qa)
+
+    def get_opset_imports(self):
+        """Returns a list of imported opsets as a {domain, version} dictionary."""
+        return {opset.domain: opset.version for opset in self._model_proto.opset_import}
+
+    def get_customop_wrapper(self, node, fallback_customop_version=util.get_preferred_qonnx_opset()):
+        """Return CustomOp instance for given node, respecting the
+        imported opset version in the model protobuf. If the node's domain
+        is not found in the model's opset imports, fallback_customop_version
+        will be used."""
+        opset_imports = self.get_opset_imports()
+        try:
+            opset_import = opset_imports[node.domain]
+            return getCustomOp(node, onnx_opset_version=opset_import)
+        except KeyError:
+            # domain not found in imports, use fallback version
+            warnings.warn(
+                f"Domain {node.domain} not found in model opset imports, "
+                f"using fallback_customop_version={fallback_customop_version}"
+            )
+            return getCustomOp(node, onnx_opset_version=fallback_customop_version)
+
+    def set_opset_import(self, domain, version):
+        """Sets the opset version for a given domain in the model's opset imports.
+        If the domain already exists, its version will be updated. If not, a new
+        opset import will be added.
+
+        Args:
+            domain (str): The domain name (e.g. "qonnx.custom_op.general")
+            version (int): The opset version number
+        """
+        # find if domain already exists in opset imports
+        for opset in self._model_proto.opset_import:
+            if opset.domain == domain:
+                opset.version = version
+                return
+        # domain not found, add new opset import
+        new_opset = onnx.OperatorSetIdProto()
+        new_opset.domain = domain
+        new_opset.version = version
+        self._model_proto.opset_import.append(new_opset)

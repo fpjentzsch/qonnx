@@ -51,11 +51,19 @@ def get_preferred_onnx_opset():
     return 13
 
 
+def get_preferred_qonnx_opset():
+    "Return preferred ONNX opset version for QONNX"
+    return 1
+
+
 def qonnx_make_model(graph_proto, **kwargs):
     "Wrapper around ONNX make_model with preferred qonnx opset version"
     opset_imports = kwargs.pop("opset_imports", None)
     if opset_imports is None:
-        opset_imports = [make_opsetid("", get_preferred_onnx_opset())]
+        opset_imports = [
+            make_opsetid("", get_preferred_onnx_opset()),
+            make_opsetid("qonnx.custom_op.general", get_preferred_qonnx_opset()),
+        ]
         kwargs["opset_imports"] = opset_imports
     else:
         kwargs["opset_imports"] = opset_imports
@@ -63,8 +71,23 @@ def qonnx_make_model(graph_proto, **kwargs):
 
 
 def is_finn_op(op_type):
-    "Return whether given op_type string is a QONNX or FINN custom op"
-    return op_type.startswith("finn") or op_type.startswith("qonnx.custom_op") or op_type.startswith("onnx.brevitas")
+    """Deprecated: Use is_custom_op from qonnx.custom_op.registry instead.
+
+    Return whether given op_type string is a QONNX or FINN custom op.
+    This function uses hard-coded string matching and will be removed in QONNX v1.0.
+    Use the registry-based is_custom_op for better accuracy and extensibility.
+    """
+    import warnings
+
+    warnings.warn(
+        "is_finn_op is deprecated and will be removed in QONNX v1.0. "
+        "Use 'from qonnx.custom_op.registry import is_custom_op' instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    from qonnx.custom_op.registry import is_custom_op
+
+    return is_custom_op(op_type)
 
 
 def get_num_default_workers():
@@ -305,13 +328,9 @@ def sanitize_quant_values(model, node_tensors, execution_context, check_values=F
             continue
         current_values = execution_context[tensor_name]
         updated_values = current_values
-        has_to_be_rounded = False
-        # TODO: vectorize with numpy
-        for value in np.nditer(current_values):
-            if not dtype.allowed(value):
-                has_to_be_rounded = True
-                break
-        if has_to_be_rounded:
+        is_allowed = dtype.allowed(current_values)
+        is_allowed = is_allowed.all() if isinstance(is_allowed, np.ndarray) else is_allowed
+        if not is_allowed:
             updated_values = np.round(current_values)
             warnings.warn(
                 "The values of tensor {} can't be represented "
@@ -323,15 +342,15 @@ def sanitize_quant_values(model, node_tensors, execution_context, check_values=F
         if max_error <= get_execution_error_thresh():
             if check_values is True:
                 # check again if values can now be represented with set finn datatype
-                # TODO: vectorize with numpy
-                for value in np.nditer(updated_values):
-                    if not dtype.allowed(value):
-                        raise Exception(
-                            """Values can't be represented with set
-                                finn datatype ({}) for input {}""".format(
-                                dtype, tensor_name
-                            )
+                is_allowed = dtype.allowed(updated_values)
+                is_allowed = is_allowed.all() if isinstance(is_allowed, np.ndarray) else is_allowed
+                if not is_allowed:
+                    raise Exception(
+                        """Values can't be represented with set
+                            finn datatype ({}) for input {}""".format(
+                            dtype, tensor_name
                         )
+                    )
             execution_context[tensor_name] = updated_values
         else:
             raise Exception(

@@ -73,6 +73,7 @@ def node_to_model(node, model, override_opset=None):
         node_model.opset_import[0].version = override_opset
     return node_model
 
+
 # optypes with the (elementwise) monotonic property
 monotonic_optypes = {
     "Identity",
@@ -137,7 +138,7 @@ def valueinfo_to_tensor(vi):
     """Creates an all-zeroes numpy tensor from a ValueInfoProto."""
 
     dims = [x.dim_value for x in vi.type.tensor_type.shape.dim]
-    return np.zeros(dims, dtype=onnx.mapping.TENSOR_TYPE_TO_NP_TYPE[vi.type.tensor_type.elem_type])
+    return np.zeros(dims, dtype=helper.tensor_dtype_to_np_dtype(vi.type.tensor_type.elem_type))
 
 
 def nchw_to_nhwc(t, model, idx, reverse=False):
